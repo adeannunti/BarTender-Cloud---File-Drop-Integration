@@ -1,0 +1,362 @@
+import os
+import sys
+import getopt
+import time
+import json
+import warnings
+import threading
+from watchdog.observers import Observer
+from watchdog.observers.polling import PollingObserver
+from watchdog.events import FileSystemEventHandler
+import requests
+import xmltodict
+warnings.filterwarnings("ignore")
+
+DEBUG = False
+VERSION = '1.0.0.1'
+AUTHOR = 'Juan Antonio Martinez'
+DATE = '14/11/2022'
+
+##############################################################
+# PackParams is a class to pack all parameters in a single
+# object, which is very convenient.
+##############################################################
+
+class PackParams():
+    def __init__(self, my_host:str, my_folder:str, my_extension:str, my_scantype:str, my_token:str, my_timeout:float):
+        self.host = my_host
+        self.folder = my_folder
+        self.extension = my_extension
+        self.scantype = my_scantype
+        self.token = my_token
+        self.timeout = my_timeout
+
+##############################################################
+# create_resp_file creates a regular file with the
+# response from the server.
+# input: resp_filename:str, response_data:str
+# returns: void
+##############################################################
+
+def create_resp_file(resp_filename:str, response_data:str):
+    f = open(resp_filename, "w")
+    f.write(response_data)
+    f.close()
+
+##############################################################
+# print_data sends the payload to the REST API server,
+# using host and token data.
+# input: resp_filename:str, my_data:str, my_params:PackParams
+# returns: void
+##############################################################
+
+def print_data( resp_filename:str, my_data:str, my_params:PackParams):
+    global DEBUG
+
+    my_host = my_params.host
+
+    my_headers = { 'Content-Type': 'application/json;charset=utf-8', 'accept': 'application/json', 'AUTHORization' : 'Bearer ' + my_params.token }
+    param_data = {"MessageCount" : 200, "MessageSeverity" : "Error", "Wait": "30s"}
+
+    response_data = '{}'
+    try:
+        if DEBUG:
+            print ( 'Send POST Req... ', file=sys.stderr )
+        zeit = time.time()
+        resp = requests.post('https://' + my_host + '/api-gateway/api/actions', params=param_data, data=my_data, headers=my_headers, verify=False)
+        elapsed_time = time.time() - zeit
+    except Exception as e:
+        response_data = '{"ERROR" : "01 - ' + str(e) + '"}'
+        if DEBUG:
+            print ( response_data , file=sys.stderr )
+        create_resp_file(resp_filename, response_data)
+        return
+
+    if resp.ok:
+        my_post_resp = resp.json()
+        if DEBUG:
+            print ( str(elapsed_time) + ' s, POST Resp: ' + json.dumps(my_post_resp) , file=sys.stderr )
+        if my_post_resp['Status'] == 'Faulted':
+            response_data = '{"ERROR" : ' + json.dumps(my_post_resp['Messages'][0]) + '}'
+            resp.close()
+            if DEBUG:
+                print ( response_data , file=sys.stderr )
+            create_resp_file(resp_filename, response_data)
+            return
+
+        my_id = resp.json()['Id']
+        resp.close()
+    else:
+        resp.close()
+        response_data = '{"ERROR" : "11 - ' + str(resp.status_code)  + ', ' + str(resp.text)[1:-1] + '"}'
+        if DEBUG:
+            print ( response_data , file=sys.stderr )
+        create_resp_file(resp_filename, response_data)
+        return
+
+    my_query_url = 'https://' + my_host + '/api-gateway/api/actions/' + my_id + '?variables=Response'
+
+    end_time = my_params.timeout
+
+    response_data = '{"ERROR" : ""}'
+
+    while end_time > elapsed_time:
+        try:
+            if DEBUG:
+                print ( str(elapsed_time) + ' s, Checking ' + my_query_url , file=sys.stderr )
+            zeit = time.time()
+            resp = requests.get( my_query_url, headers=my_headers, verify=False)
+            elapsed_time += time.time()-zeit
+        except Exception as e:
+            response_data = '{"ERROR" : "02 - ' + str(e) + '"}'
+            break
+
+        if resp.ok:
+            json_response = resp.json()
+            if 'Variables' in json_response and 'Response' in json_response['Variables']:
+                my_response = json_response['Variables']['Response']
+                response_data = json.dumps(xmltodict.parse(my_response), indent=4, sort_keys=True).replace('@','')
+                if DEBUG:
+                    print ( str(elapsed_time) + ' s, OK' , file=sys.stderr )
+                break
+        else:
+            response_data = '{"ERROR" : "12 - ' + str(resp.status_code)  + ', ' + str(resp.text) + '"}'
+
+        resp.close()
+        time.sleep(0.2)
+
+    if end_time <= elapsed_time:
+        tmp_rsp_json = json.loads(response_data)
+        tmp_rsp_json['ERROR'] = 'TIMEOUT - ' + str(elapsed_time) + 's, ' + tmp_rsp_json['ERROR']
+        response_data = json.dumps(tmp_rsp_json)
+
+    create_resp_file(resp_filename, response_data)
+
+    if DEBUG:
+        print ( response_data , file=sys.stderr )
+
+##############################################################
+# my_helper_function first renames the detected file,
+# eventually appending a timestamp and spawns
+# a thread to send its contents on print_data.
+# input: new_file: str, my_params: PackParams
+# returns: void
+##############################################################
+
+def my_helper_function(new_file: str, my_params: PackParams):
+    global DEBUG
+
+    my_extension = my_params.extension
+
+    filename, file_extension = os.path.splitext(new_file)
+
+    #if DEBUG:
+    #    print ( os.path.isfile(new_file), 'file ext:' + file_extension, 'scanned ext: ' + my_extension , file=sys.stderr )
+
+    if not os.path.isfile(new_file):
+        return
+
+    if my_extension == '.*':
+        if file_extension not in ('.json', '.yaml', '.btxml'):
+            return
+    else:
+        if (file_extension != my_extension):
+            return
+
+    new_filename = filename + '.scanned'
+
+    if os.path.exists(new_filename):
+        new_filename = filename + '_' + str(time.time()).replace('.','_') + '.scanned'
+
+    for i in range(0,100):
+        try:
+            os.rename(new_file, new_filename)
+            break
+        except:
+            time.sleep(0.0001)
+
+    resp_filename, resp_extension = os.path.splitext(new_filename)
+    resp_filename = resp_filename + '.resp'
+
+    try:
+        event_data = ''
+        with open(new_filename) as f:
+            for line in f:
+                event_data += line
+            f.close()
+
+        x = threading.Thread(target=print_data, args=(resp_filename, event_data, my_params))
+        x.name = 'BTCFI-'+ x.name
+        x.start()
+
+    except:
+        if DEBUG:
+            print (new_filename + ' not found!', file=sys.stderr )
+
+##############################################################
+# existing_files processes eventual files
+# which could exist in the folder before launching
+# the script.
+# input: my_params: PackParams
+# returns: void
+##############################################################
+
+def existing_files(my_params: PackParams):
+    global DEBUG
+
+    if DEBUG:
+        print ("Checking existing files in folder...", file=sys.stderr )
+
+    dir_path = my_params.folder
+
+    for myfile in os.listdir(dir_path):
+        my_helper_function(os.path.join(dir_path, myfile), my_params)
+
+##############################################################
+# MyFileSystemEventHandler is a class based on 
+# FileSystemEventHandler to hook passing data (PackParams) and
+# executing a specific vector on on_any_event
+##############################################################
+
+class MyFileSystemEventHandler(FileSystemEventHandler):
+    def __init__(self, my_params):
+        self.my_params = my_params
+
+    def on_any_event(self, event):
+        if event.event_type == 'modified' or event.event_type == 'created':
+            my_helper_function(event.src_path, self.my_params)
+
+##############################################################
+# start_scanning spawns a scanning thread (observer) to detect
+# files in the specified folder
+# input: my_params: PackParams
+# returns: void
+##############################################################
+
+def start_scanning(my_params: PackParams):
+    global DEBUG
+
+    my_folder = my_params.folder
+
+    if not os.path.exists(my_folder):
+        os.mkdir(my_folder)
+    else:
+        existing_files(my_params)
+
+    event_handler = MyFileSystemEventHandler(my_params)
+
+    if my_params.scantype.lower() == 'notification':
+        observer = Observer()
+    else:
+        observer = PollingObserver(float(my_params.scantype))
+
+    observer.schedule(event_handler, my_folder, recursive=False)
+    observer.start()
+
+    if DEBUG:
+        print ("Waiting...", file=sys.stderr )
+
+    try:
+        while observer.is_alive():
+            observer.join(0.01)
+            threads = threading.enumerate()
+            if threads:
+                for thread in threads:
+                    if thread.name[:len('BTCFI-')] == 'BTCFI-':
+                        #print(thread.name)
+                        pass
+
+    except KeyboardInterrupt:
+        observer.stop()
+
+    observer.join()
+
+    if DEBUG:
+        print ("Stopped", file=sys.stderr )
+
+##############################################################
+# print_usage prints the help and exits the programme with 
+# provided exit code.
+# input: exit_code:int
+# returns: void
+##############################################################
+
+def print_usage(exit_code:int):
+    global DEBUG
+
+    print("Version: " + VERSION + "\r\nAUTHOR: " + AUTHOR +"\r\nUsage: <scriptname>.py [--help] | [--host <hostname> --scan <folder> --ext <extension> --token <token file> --method <notification|polling interval in seconds> --timeout timeout]\r\n\
+    CTL-C to Abort\r\n\
+    \t --host|-H Hostname of Cloud's Tenant\r\n\
+    \t --scan|-s Local path of folder to scan. Enclose in double quotes if there are spaces\r\n\
+    \t --ext|-e File extension to scan. Valid ones are json, btxml and yaml. An * would accept any of those\r\n\
+    \t --method|-m Method to scan files in the folder. In case of polling, use the interval in (decimal) seconds (i.e, 0.5, 1.5)\r\n\
+    \t --token|-T Auth0 Bearer token file. Enclose in double quotes if there are spaces\r\n\
+    \t --timeout|-t timeout in seconds\r\n\
+    \t --help|-h This help\r\n", file=sys.stderr )
+
+    sys.exit(exit_code)
+
+##############################################################
+# main is the entry for the programme, it validates the 
+# arguments and starts the process.
+# input: argv:list
+# returns: void
+##############################################################
+
+def main(argv):
+    global DEBUG
+
+    if len(argv) not in (1,12):
+        print ("Wrong number of arguments!", file=sys.stderr )
+        print_usage(1)
+
+    try:
+        opts, args = getopt.getopt(argv,"hH:s:e:m:T:t:",["help", "host=", "scan=", "ext=", "method=", "token=", "timeout="])
+    except getopt.GetoptError:
+        print("Option not supported!", file=sys.stderr )
+        print_usage(1)
+
+    my_host = ""
+    my_extension = ""
+    my_folder = ""
+    my_scantype = ""
+    my_timeout = 120.0
+
+    for opt, arg in opts:
+        if opt in ("-h", "--help"):
+            print("Help:", file=sys.stderr )
+            print_usage(0)
+
+        elif opt in ("-H", "--host"):
+            my_host = arg
+
+        elif opt in ("-s", "--scan"):
+            my_folder = arg
+
+        elif opt in ("-e", "--ext"):
+            if arg not in ('json', 'btxml', 'yaml', '*'):
+                print("Extension not supported!", file=sys.stderr )
+                print_usage(1)
+
+            my_extension = '.' + arg
+
+        elif opt in ("-m", "--method"):
+            my_scantype = arg
+
+        elif opt in ("-t", "--timeout"):
+            my_timeout = float(arg)
+
+        elif opt in ("-T", "--token"):
+            try:
+                f = open(arg, "r")
+                my_token = f.read()
+                f.close()
+            except:
+                print("Wrong Token File:", file=sys.stderr )
+                print_usage(2)
+
+    my_params = PackParams(my_host, my_folder, my_extension, my_scantype, my_token, my_timeout)
+    start_scanning(my_params)
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

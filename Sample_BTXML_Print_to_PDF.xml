@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<XMLScript Version="2.0" ID="123">
+  <Command Name="Job1">
+    <Print>
+      <Format>Librarian://main/Sample_Doc1.btw</Format>
+			
+			<NamedSubString Name="NDS_One">
+        <Value>Data Here - A</Value>
+      </NamedSubString>
+			
+			<NamedSubString Name="NDS_Two">
+        <Value>Data Here - B</Value>
+      </NamedSubString>
+			
+      <PrintSetup>  
+				        <IdenticalCopiesOfLabel>1</IdenticalCopiesOfLabel>
+				<Printer>PDF</Printer>
+				<PrintToFile>True</PrintToFile>
+				<PrintToFileName>Librarian://main/Sample_Doc1_PDF.pdf</PrintToFileName>
+      </PrintSetup>
+    </Print>
+  </Command>
+</XMLScript>
